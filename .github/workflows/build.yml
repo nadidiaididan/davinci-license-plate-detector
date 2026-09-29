@@ -35,3 +35,35 @@ jobs:
           name: ${{ matrix.artifact }}
           path: build/PlateMask.ofx.bundle
           if-no-files-found: error
+
+  release:
+    name: attach release assets
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Package
+        run: |
+          set -e
+          V="${GITHUB_REF_NAME#v}"
+          for p in windows-x64 linux-x64 macos-universal; do
+            d="PlateMask-$V-$p"; mkdir -p "$d"
+            cp -R "artifacts/PlateMask-$p" "$d/PlateMask.ofx.bundle"
+            cp README.md "$d/"
+            case "$p" in
+              windows-x64) cp packaging/install.bat packaging/uninstall.bat "$d/" ;;
+              *) cp packaging/install.sh packaging/uninstall.sh "$d/"; chmod +x "$d"/*.sh ;;
+            esac
+            zip -qry "$d.zip" "$d"
+          done
+          ls -la *.zip
+      - name: Upload to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" PlateMask-*.zip --clobber --repo "$GITHUB_REPOSITORY"

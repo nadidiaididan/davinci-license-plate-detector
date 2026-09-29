@@ -1,7 +1,8 @@
 # PlateMask — licence-plate detection, tracking and destructive masking for DaVinci Resolve
 
-An OpenFX plugin for DaVinci Resolve (verified on Resolve 21.0, macOS, Apple silicon + Intel
-universal binary). Click a licence plate in the viewer, press **Detect license plate**, check the
+An OpenFX plugin for DaVinci Resolve Studio on macOS (Apple silicon + Intel universal binary),
+Windows (x64) and Linux (x64). Verified end to end inside Resolve 21.0 on macOS; the Windows and
+Linux builds are produced and tested on real machines by CI (see *What was verified*). Click a licence plate in the viewer, press **Detect license plate**, check the
 box, press **Track license plate**. The plate is followed through the clip — including partial and
 full occlusion, leaving the frame and coming back — and destroyed with an irreversible blur, mosaic
 or pixel randomiser. Swiss plate formats (300×80 front, 500×110 rear) are the priority aspect
@@ -10,25 +11,39 @@ ratios; up to 8 plates per effect instance; the matte can be exported to drive o
 The design decomposition (epistemologies, axioms, fractals, factors) is in
 [`spec/decomposition.json`](spec/decomposition.json).
 
-## Build
+## Install (release downloads)
 
-Requires Xcode command-line tools (clang) and `make`. No other dependencies; the OpenFX headers
-and C++ Support library are vendored under `third_party/openfx`.
+Grab the zip for your platform from the GitHub release page. Resolve **Studio** is required on
+every platform (the free edition does not load third-party OpenFX plugins).
+
+- **macOS**: run `install.sh` (asks for your password and clears the download-quarantine flag), or
+  open the `.pkg`. Installs to `/Library/OFX/Plugins`.
+- **Windows**: right-click `install.bat` → *Run as administrator*. Installs to
+  `C:\Program Files\Common Files\OFX\Plugins`. The DLL is self-contained (static C runtime).
+- **Linux**: `sudo ./install.sh`. Installs to `/usr/OFX/Plugins`.
+
+Restart Resolve afterwards. The effect is under *OpenFX › Filters › PlateMask › License Plate Mask*.
+
+## Build from source
+
+No dependencies beyond a C++17 compiler and CMake; the OpenFX headers and C++ Support library are
+vendored under `third_party/openfx`.
 
 ```sh
-make            # builds build/PlateMask.ofx.bundle (arm64 + x86_64 on macOS)
-make test       # core algorithm tests on a synthetic clip (detection, occlusion, exit/return, obfuscation)
-make cli        # build/platemask_cli: run the pipeline on PPM frames outside Resolve
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release   # Windows: add -A x64 (Visual Studio 2022)
+cmake --build build --config Release --parallel
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-## Install
+`ctest` runs the core algorithm tests and the **mini host** (`tests/minihost.cpp`), a minimal
+OpenFX host that loads the built plugin binary exactly as Resolve would, runs describe / instance
+creation / detection / tracking / render on the synthetic clip and checks the result. The bundle
+lands in `build/PlateMask.ofx.bundle` with the platform sub-folder Resolve expects (`MacOS`,
+`Win64`, `Linux-x86-64`).
 
-```sh
-sudo make install     # copies the bundle to /Library/OFX/Plugins, then restart Resolve
-```
-
-Without installing, Resolve honours the OFX search path environment variable, e.g.
-`open --env OFX_PLUGIN_PATH="$PWD/build" -a "DaVinci Resolve"`.
+On macOS the plain `Makefile` still works: `make`, `make test`, `make cli`, `sudo make install`,
+`make dist` (zip + pkg). For development without installing, Resolve honours the OFX search path:
+`scripts/run_resolve_dev.sh` launches it with the build folder on `OFX_PLUGIN_PATH`.
 
 ## Usage in Resolve
 
@@ -102,8 +117,9 @@ tracking without the GUI through the hidden request inputs (`detectRequest`, `tr
   are mirrored into a hidden string parameter so projects stay self-contained. Overlays use the
   OFX 1.5 Draw Suite (Resolve provides no OpenGL context).
 
-Diagnostics: create `~/Library/Logs/PlateMask.log` (or set `PLATEMASK_LOG=1`) and the plugin logs
-describe/instance/render/detect/track/overlay events to it.
+Diagnostics: the plugin always logs events (describe, instance creation, detection, tracking,
+overlay) to `~/Library/Logs/PlateMask.log` (macOS), `%APPDATA%\PlateMask.log` (Windows) or
+`~/.platemask.log` (Linux); per-frame render lines are added when `PLATEMASK_LOG=1` is set.
 
 ## What was verified
 
@@ -116,6 +132,14 @@ describe/instance/render/detect/track/overlay events to it.
   with a valid Draw Suite context, the monitor window updated from the render thread while tracking,
   Deliver-page render with the mosaic following the plate. On the Edit page with real footage:
   overlay draw, click-to-seed, detection and tracking confirmed through the plugin log.
+* Windows x64 and Linux x64: built by GitHub Actions on real Windows (MSVC, Visual Studio 2022)
+  and Ubuntu runners; the core tests and the mini host pass there, i.e. the actual `PlateMask.ofx`
+  DLL / shared object exports the OpenFX entry points, describes, instantiates, tracks the whole
+  synthetic clip through temporal clip access and renders the mask. On Windows the monitor window
+  runs on its own UI thread (Win32). What has **not** been done yet is loading these builds inside
+  Resolve Studio on Windows or Linux; the host-facing code is identical to the macOS build that
+  was verified in Resolve, so please report the plugin log (`%APPDATA%\PlateMask.log` on Windows,
+  `~/.platemask.log` on Linux) if anything differs.
 * Not exercised by automation (needs a mouse): clicking in the viewer and dragging corner handles
   on the Edit/Color pages. The code path is the standard OFX interact pen actions.
 
@@ -127,3 +151,5 @@ describe/instance/render/detect/track/overlay events to it.
 * Tracking is planar-similarity (no full perspective update per frame); strong perspective changes
   are handled by manual anchors.
 * Float RGBA only (what Resolve delivers to OpenFX).
+* Linux has no monitor window yet (tracking feedback there is the Status field and the host
+  progress dialog).
