@@ -96,7 +96,9 @@ dist: plugin
 	cp packaging/install.sh packaging/uninstall.sh README.md $(DIST)/
 	cd $(BUILD)/dist && zip -qry PlateMask-$(VERSION)-macOS.zip PlateMask-$(VERSION)-macOS
 	mkdir -p $(BUILD)/pkgroot && rm -rf $(BUILD)/pkgroot/* && cp -R $(BUNDLE) $(BUILD)/pkgroot/
-	pkgbuild --root $(BUILD)/pkgroot --install-location /Library/OFX/Plugins --identifier ch.platemask.ofx --version $(VERSION) $(DIST).pkg >/dev/null
+	pkgbuild --analyze --root $(BUILD)/pkgroot $(BUILD)/pkgroot.plist >/dev/null
+	/usr/libexec/PlistBuddy -c 'Set :0:BundleIsRelocatable false' $(BUILD)/pkgroot.plist 2>/dev/null || true
+	pkgbuild --root $(BUILD)/pkgroot --component-plist $(BUILD)/pkgroot.plist --install-location /Library/OFX/Plugins --identifier ch.platemask.ofx --version $(VERSION) $(DIST).pkg >/dev/null
 	@echo "Release files:"; ls -la $(DIST).zip $(DIST).pkg
 
 clean:
