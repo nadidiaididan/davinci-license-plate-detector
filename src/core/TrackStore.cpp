@@ -141,6 +141,16 @@ bool Store::fromJson(const std::string& s) {
   return true;
 }
 
+// mkdir -p
+static void makeDirs(const std::string& path) {
+  std::string cur;
+  for (size_t i = 0; i < path.size(); ++i) {
+    cur += path[i];
+    if ((path[i] == '/' || path[i] == '\\') && cur.size() > 1) MKDIR(cur.c_str());
+  }
+  MKDIR(path.c_str());
+}
+
 std::string sidecarDir() {
   std::string base;
 #ifdef _WIN32
@@ -153,9 +163,8 @@ std::string sidecarDir() {
   const char* home = getenv("HOME");
   base = std::string(home ? home : "/tmp") + "/.local/share/PlateMask";
 #endif
-  MKDIR(base.c_str());
   std::string dir = base + "/tracks";
-  MKDIR(dir.c_str());
+  makeDirs(dir);
   return dir;
 }
 
