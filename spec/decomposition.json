@@ -1,0 +1,347 @@
+{
+  "$schema": "spec/decomposition.schema (informal)",
+  "project": {
+    "name": "davinci-license-plate-detector",
+    "one_liner": "DaVinci Resolve plugin that detects, tracks, and destructively anonymises vehicle license plates (Swiss plates prioritised), with the resulting matte exposed as a mask for downstream effects.",
+    "host": {
+      "application": "DaVinci Resolve",
+      "candidate_integration_surfaces": [
+        {
+          "surface": "OpenFX (OFX) plugin",
+          "pages": ["Edit", "Color", "Fusion (as OpenFX node)"],
+          "pros": ["single binary for all pages", "OFX Interact API gives viewer overlay + click capture", "keyframeable params carry the track"],
+          "cons": ["Resolve ships partial OFX Interact support; overlay handles must be verified per page", "no native multi-output mask port; mask must go out via alpha channel or a separate 'mask-only' render mode"]
+        },
+        {
+          "surface": "Fusion native plugin (Fusion SDK, C++) or Fuse (Lua)",
+          "pages": ["Fusion"],
+          "pros": ["true mask output port (Mask datatype)", "polyline / on-screen controls are first-class", "composable with MediaIn/Merge/any node"],
+          "cons": ["Fusion page only", "Fuse cannot host a neural network; needs a C++ Fusion plugin or an out-of-process inference server"]
+        },
+        {
+          "surface": "Resolve Scripting API (Python/Lua) + Workflow Integration panel",
+          "pages": ["all"],
+          "pros": ["can drive inference out-of-process and write Fusion comps / power windows"],
+          "cons": ["no per-frame pixel access; cannot draw in viewer; unsuitable as the primary renderer"]
+        }
+      ],
+      "recommended_architecture": "OFX plugin with Interact overlay for click-to-seed and quad handles; inference in an out-of-process engine (ONNX Runtime / CoreML / TensorRT) over shared memory; track stored as keyframed OFX params (4 corner points per plate instance); mask emitted on the alpha channel with a 'Mask Only' output mode so it can feed Resolve alpha/External Matte and Fusion MatteControl."
+    }
+  },
+
+  "epistemologies": {
+    "_definition": "The distinct ways the system comes to 'know' where a plate is. Each has its own evidence source, uncertainty model, and failure mode.",
+    "items": [
+      {
+        "id": "E1",
+        "name": "Empirical / learned prior (detection)",
+        "mode_of_knowing": "Inductive inference from a supervised dataset via a convolutional or transformer detector.",
+        "evidence": "Single-frame pixel data.",
+        "representation": "Oriented bounding box (OBB) or 4-point quadrilateral via corner keypoint regression; class probability; confidence score.",
+        "jargon": ["tracking-by-detection", "OBB", "keypoint regression", "non-maximum suppression (NMS)", "confidence threshold", "anchor-free detector", "prompt-conditioned detection"],
+        "uncertainty": "Per-detection confidence; calibrated via temperature scaling on a held-out Swiss set.",
+        "failure_modes": ["false positives on signage / bumper stickers", "misses under motion blur or specular glare", "domain shift on non-Swiss plates"]
+      },
+      {
+        "id": "E2",
+        "name": "Human-in-the-loop ground truth (click seeding)",
+        "mode_of_knowing": "Testimonial: the operator asserts 'a plate is here' by clicking in the viewer.",
+        "evidence": "Seed point (x, y) on the seed frame, in normalised canonical coordinates.",
+        "representation": "Seed acts as a spatial prior / prompt that gates detection to the neighbourhood of the click and disambiguates multiple candidate plates.",
+        "jargon": ["seed point", "promptable segmentation", "ROI gating", "operator affirmation", "keyframe"],
+        "uncertainty": "Treated as near-certain for existence; imprecise for extent (click may land off-centre or on an occluder).",
+        "failure_modes": ["click on reflection of a plate", "click on a plate that is already partially out of frame"]
+      },
+      {
+        "id": "E3",
+        "name": "Bayesian state estimation (tracking)",
+        "mode_of_knowing": "Recursive predict-observe-correct over time using a motion model and per-frame observations.",
+        "evidence": "Sequence of detections / optical-flow measurements / planar homography estimates.",
+        "representation": "State vector per plate: 4 corners (or centre, size, rotation, perspective) + velocities; covariance matrix.",
+        "jargon": ["Kalman filter", "constant-velocity motion model", "process noise", "measurement noise", "innovation", "gating", "Hungarian assignment", "IoU association", "planar tracker", "homography", "Lucas-Kanade optical flow", "bidirectional tracking", "tracklet"],
+        "uncertainty": "Covariance grows during prediction-only (occluded / out-of-frame) frames; shrinks on confirmed observations.",
+        "failure_modes": ["drift during long occlusions", "ID switch between two adjacent plates", "camera cut treated as motion"]
+      },
+      {
+        "id": "E4",
+        "name": "Appearance identity (re-identification)",
+        "mode_of_knowing": "Similarity: the object reappearing is the same object because its embedding matches.",
+        "evidence": "Crop of the plate region fed to an embedding network; optionally OCR string of the plate.",
+        "representation": "Feature vector; cosine similarity; optional plate string with per-character confidence.",
+        "jargon": ["re-ID", "appearance embedding", "cosine similarity", "gallery / probe", "track re-acquisition", "OCR-assisted association"],
+        "uncertainty": "Similarity threshold; ambiguous when plates are small or blurred.",
+        "failure_modes": ["two identical-looking plates (fleet vehicles)", "embedding collapse at low resolution"]
+      },
+      {
+        "id": "E5",
+        "name": "Visibility state reasoning (occlusion logic)",
+        "mode_of_knowing": "Abductive: the best explanation for a missing observation is chosen from a finite set of hypotheses.",
+        "evidence": "Detection presence/absence, predicted position vs frame bounds, partial-overlap ratio, optical-flow consistency.",
+        "representation": "Finite-state machine per track: TENTATIVE → CONFIRMED → PARTIALLY_OCCLUDED → FULLY_OCCLUDED → OUT_OF_FRAME → REACQUIRED → TERMINATED.",
+        "jargon": ["visibility ratio", "occlusion hypothesis", "hold / extrapolate", "frame-boundary clipping", "max-age", "coast", "hysteresis"],
+        "uncertainty": "Explicit per-state confidence decay; operator can override any state on any frame.",
+        "failure_modes": ["declaring TERMINATED before a legitimate return", "mask 'popping' at state transitions"]
+      },
+      {
+        "id": "E6",
+        "name": "Operator verification (falsification gate)",
+        "mode_of_knowing": "Critical rationalism: a detection/track is accepted only after the operator has had the chance to falsify it.",
+        "evidence": "Viewer overlay of the quad and mask; scrub through the tracked range.",
+        "representation": "Explicit 'Detect' then 'Track' buttons; nothing is committed to render until the operator has seen the detection on the seed frame.",
+        "jargon": ["verification gate", "two-stage commit", "overlay preview", "keyframe editing"],
+        "uncertainty": "Human error; mitigated by making every keyframe editable after tracking.",
+        "failure_modes": ["operator approves a quad that is too tight", "operator forgets to re-verify after retiming"]
+      },
+      {
+        "id": "E7",
+        "name": "Information-theoretic irreversibility (anonymisation guarantee)",
+        "mode_of_knowing": "Deductive: the output cannot be inverted because the information required to invert it has been destroyed, not hidden.",
+        "evidence": "Analysis of the obfuscation operator's channel capacity and its resistance to known attacks.",
+        "representation": "Obfuscation = lossy quantisation ∘ stochastic permutation ∘ temporal jitter; the random seed is discarded after use and never written to metadata.",
+        "jargon": ["de-pixelation attack", "mosaic attack", "temporal averaging / multi-frame super-resolution attack", "entropy destruction", "non-invertible operator", "seed discard", "destructive render"],
+        "uncertainty": "Zero by construction for the destroyed bits; residual risk only in untouched pixels outside the mask.",
+        "failure_modes": ["insufficient block size leaves legible characters", "deterministic seed reused across frames enables temporal averaging"]
+      }
+    ]
+  },
+
+  "axioms": {
+    "_definition": "Invariants that must hold for every build. If any is violated the plugin is considered broken regardless of other features.",
+    "items": [
+      {
+        "id": "A1",
+        "name": "Destructiveness",
+        "statement": "Any anonymising output mode (blur, pixelize, randomize) must be non-invertible from the rendered frames alone. No seed, key, or side-channel that permits reconstruction is ever persisted.",
+        "derives": ["E7"]
+      },
+      {
+        "id": "A2",
+        "name": "Source non-destruction",
+        "statement": "The plugin never modifies the source media; all effects live in the timeline/node graph and are removable.",
+        "derives": ["host integration model"]
+      },
+      {
+        "id": "A3",
+        "name": "Temporal coherence",
+        "statement": "Across consecutive frames the mask must vary smoothly in position, scale, and shape; state transitions (occluded, out-of-frame, return) must not cause a single-frame pop.",
+        "derives": ["E3", "E5"]
+      },
+      {
+        "id": "A4",
+        "name": "Fail-safe coverage",
+        "statement": "When uncertain, over-cover rather than under-cover: the mask expands with predicted covariance during occlusion; a plate is never un-masked because tracking is unsure.",
+        "derives": ["E3", "E5", "A1"]
+      },
+      {
+        "id": "A5",
+        "name": "Swiss-first priors",
+        "statement": "Detector, aspect-ratio priors, and test corpus are weighted for Swiss plate formats first; other formats are supported but never at the expense of Swiss recall.",
+        "derives": ["E1"]
+      },
+      {
+        "id": "A6",
+        "name": "Multi-instance independence",
+        "statement": "Each plate is an independent track with its own lifecycle, keyframes, and parameters; adding or deleting one never alters another.",
+        "derives": ["E3", "E4"]
+      },
+      {
+        "id": "A7",
+        "name": "Operator sovereignty",
+        "statement": "Every automated result (quad, keyframe, visibility state) is editable by the operator, and manual edits are never overwritten by a re-run unless explicitly requested.",
+        "derives": ["E2", "E6"]
+      },
+      {
+        "id": "A8",
+        "name": "Two-stage commit",
+        "statement": "Detection and tracking are separate user actions ('Detect license plate' then 'Track license plate'); tracking is never triggered implicitly.",
+        "derives": ["E6"]
+      },
+      {
+        "id": "A9",
+        "name": "Mask exportability",
+        "statement": "The matte is available as a standalone signal (alpha channel / mask output / Mask Only mode) so it can drive arbitrary downstream effects, not only the built-in obfuscators.",
+        "derives": ["host integration model"]
+      },
+      {
+        "id": "A10",
+        "name": "Determinism of non-random paths",
+        "statement": "Given the same keyframes and parameters, all non-stochastic outputs (mask shape, blur) are bit-identical between preview and final render; only the deliberately random obfuscators are frame-unique.",
+        "derives": ["A1", "render pipeline"]
+      },
+      {
+        "id": "A11",
+        "name": "Colour-space neutrality",
+        "statement": "Mask generation operates on a linearised luma/working-space copy; obfuscation is applied in the host's working colour space so results are consistent across Rec.709, DaVinci Wide Gamut, and ACES timelines.",
+        "derives": ["render pipeline"]
+      }
+    ]
+  },
+
+  "fractals": {
+    "_definition": "Self-similar structures that recur at multiple scales of the system. Recognising them lets the same code path and the same mental model serve every level.",
+    "items": [
+      {
+        "id": "F1",
+        "name": "Predict → Observe → Correct loop",
+        "pattern": "The Kalman cycle repeats at every temporal scale.",
+        "scales": [
+          {"scale": "frame", "instance": "predict corner positions, observe detection/flow, correct state"},
+          {"scale": "occlusion span", "instance": "predict trajectory across the gap, observe re-appearance, correct the interpolated keyframes bidirectionally"},
+          {"scale": "shot", "instance": "predict that a plate persists, observe a cut, terminate / re-seed"},
+          {"scale": "session", "instance": "operator predicts a track is fine, observes a slip on scrub, corrects a keyframe"}
+        ],
+        "jargon": ["recursive estimation", "bidirectional smoothing (RTS smoother)", "keyframe interpolation"]
+      },
+      {
+        "id": "F2",
+        "name": "Seed → Detect → Verify → Track lifecycle",
+        "pattern": "The four-step user workflow is identical for one plate, for N plates, and for re-seeding after a return-to-frame.",
+        "scales": [
+          {"scale": "single plate", "instance": "click, detect, verify, track"},
+          {"scale": "multiple plates", "instance": "the same lifecycle instantiated per track, run independently (A6)"},
+          {"scale": "re-acquisition", "instance": "when re-ID fails, the operator re-seeds mid-clip and the sub-track is stitched into the parent tracklet"}
+        ],
+        "jargon": ["track lifecycle", "tracklet stitching", "re-seed"]
+      },
+      {
+        "id": "F3",
+        "name": "Coarse-to-fine pyramid",
+        "pattern": "Detection and tracking both refine a coarse hypothesis to a fine one.",
+        "scales": [
+          {"scale": "image pyramid", "instance": "Lucas-Kanade / detector runs on downsampled levels first"},
+          {"scale": "geometry", "instance": "axis-aligned bbox → oriented bbox → 4-point quad → sub-pixel corner refinement"},
+          {"scale": "mask", "instance": "hard quad → expanded/contracted morphology → feathered soft edge"}
+        ],
+        "jargon": ["image pyramid", "sub-pixel refinement", "morphological dilation/erosion", "feather"]
+      },
+      {
+        "id": "F4",
+        "name": "Containment hierarchy",
+        "pattern": "Every level contains the next as an independent unit with the same interface (id, bounds, confidence, state).",
+        "scales": [
+          {"scale": "timeline", "instance": "clips"},
+          {"scale": "clip", "instance": "plate tracks"},
+          {"scale": "track", "instance": "keyframes"},
+          {"scale": "keyframe", "instance": "4 corners + visibility state"},
+          {"scale": "plate region", "instance": "characters (only for OCR-assisted re-ID; never persisted)"}
+        ],
+        "jargon": ["scene graph", "instance list", "keyframe track"]
+      },
+      {
+        "id": "F5",
+        "name": "Mask operator composition",
+        "pattern": "Every output modifier is a pure function mask → mask or (image, mask) → image, so they compose in any order and the whole chain is itself one such function.",
+        "scales": [
+          {"scale": "shape ops", "instance": "expand, contract, feather"},
+          {"scale": "pixel ops", "instance": "blur, pixelize, randomize"},
+          {"scale": "chain", "instance": "the ordered stack is one composite operator applied per plate then unioned"}
+        ],
+        "jargon": ["matte pipeline", "operator chain", "union of mattes", "premultiplied alpha"]
+      },
+      {
+        "id": "F6",
+        "name": "Uncertainty inflation",
+        "pattern": "Whatever the level, lack of evidence expands the region rather than shrinking it (A4).",
+        "scales": [
+          {"scale": "pixel", "instance": "feather widens with track covariance"},
+          {"scale": "frame", "instance": "predicted quad grows by covariance-derived margin during occlusion"},
+          {"scale": "span", "instance": "coast window extends the mask past the last confirmed frame by a user-set 'hold' count"}
+        ],
+        "jargon": ["covariance-driven dilation", "coast frames", "hold"]
+      }
+    ]
+  },
+
+  "factors": {
+    "_definition": "Independent variables that change how the system behaves or how well it performs. Grouped by the layer they act on.",
+    "plate_domain": {
+      "swiss_formats": [
+        {"type": "front (Vorderschild)", "size_mm": [300, 80], "aspect_ratio": 3.75, "notes": "canton code + up to 6 digits, black on white, no shields"},
+        {"type": "rear (Hinterschild), long", "size_mm": [500, 110], "aspect_ratio": 4.55, "notes": "Swiss cross left, canton coat of arms right"},
+        {"type": "rear, short / motorcycle", "size_mm": [300, 80], "aspect_ratio": 3.75, "notes": "some cantons issue the short variant on the rear"},
+        {"type": "motorcycle (two-line)", "size_mm": [180, 140], "aspect_ratio": 1.29, "notes": "canton code on the first line, number on the second"},
+        {"type": "moped / e-bike (yellow)", "size_mm": [100, 140], "aspect_ratio": 0.71, "notes": "yellow ground, black text; hard case"},
+        {"type": "dealer / temporary (U, Z, CD, CC, AT)", "size_mm": [500, 110], "aspect_ratio": 4.55, "notes": "special suffix letters; temporary plates have a red stripe"}
+      ],
+      "secondary_formats": ["EU (520×110, blue band)", "DE / AT / FR / IT (blue band + national letters)", "US-style (~2:1)"],
+      "appearance_variables": ["retro-reflective glare", "specular highlight from headlights", "dirt / snow occlusion", "screw heads and frames", "plate holders with dealer text", "low-light noise", "rolling-shutter skew"]
+    },
+    "scene_and_camera": {
+      "motion": ["static camera / moving car", "moving camera / static car", "both moving", "handheld shake"],
+      "occluders": ["pedestrians", "other vehicles", "poles / foliage", "the car's own body during turns (self-occlusion)"],
+      "frame_events": ["exit left/right/top/bottom", "re-entry from a different edge", "cuts inside a clip (multicam / speed ramps)", "retiming"],
+      "optical": ["motion blur length", "depth of field / focus breathing", "lens distortion", "resolution (plate height in pixels: <12 px is the practical floor for detection)"],
+      "temporal": ["frame rate", "variable frame rate", "interlacing", "frame blending from retimes"]
+    },
+    "detection_hyperparameters": {
+      "confidence_threshold": {"default": 0.35, "range": [0.05, 0.95]},
+      "seed_gating_radius_px": {"default": 96, "note": "search radius around the click, scaled with clip resolution"},
+      "nms_iou": {"default": 0.5},
+      "aspect_ratio_prior_weight": {"default": 0.3, "note": "penalises candidates far from Swiss ratios (A5)"},
+      "inference_resolution": {"options": [640, 960, 1280], "note": "letterboxed; higher improves small-plate recall at a speed cost"}
+    },
+    "tracking_hyperparameters": {
+      "motion_model": {"options": ["constant velocity", "constant acceleration"], "default": "constant velocity"},
+      "process_noise": {"default": 0.02},
+      "measurement_noise": {"default": 0.5},
+      "association_gate_iou": {"default": 0.3},
+      "reid_similarity_threshold": {"default": 0.7},
+      "max_age_frames": {"default": 90, "note": "frames a track may coast fully unobserved before TERMINATED; operator can extend"},
+      "partial_occlusion_ratio": {"default": 0.4, "note": "visible fraction below which state → PARTIALLY_OCCLUDED and mask holds last full shape"},
+      "out_of_frame_margin_px": {"default": 8},
+      "direction": {"options": ["forward", "backward", "bidirectional"], "default": "bidirectional"},
+      "keyframe_density": {"options": ["every frame", "adaptive (on innovation > τ)"], "default": "adaptive"},
+      "smoothing": {"options": ["none", "RTS smoother", "Savitzky–Golay on corners"], "default": "RTS smoother"}
+    },
+    "mask_output_modifiers": {
+      "expand_contract_px": {"default": 4, "range": [-64, 128], "op": "morphological dilation (positive) / erosion (negative) on the quad matte"},
+      "feather_px": {"default": 6, "range": [0, 128], "op": "Gaussian falloff on the matte edge; interacts with A4 (feather never reveals the plate core)"},
+      "blur": {"kernel": ["Gaussian", "box", "directional"], "radius_px": {"default": 24, "range": [0, 256]}, "irreversibility_note": "Gaussian blur alone is partially invertible (deconvolution); when 'destructive' is on, blur is followed by quantisation + noise"},
+      "pixelize": {"block_px": {"default": 24, "range": [4, 256]}, "block_grid": ["screen-aligned", "quad-aligned (perspective-correct)"], "irreversibility_note": "static mosaic is vulnerable to temporal-averaging attacks; destructive mode jitters block phase per frame and randomises within-block colour"},
+      "randomize_pixels": {"mode": ["intra-block permutation", "noise replacement", "hash-derived colour fill"], "seed_policy": "fresh CSPRNG seed per frame per plate, discarded after render (A1)"},
+      "destructive_lock": {"default": true, "note": "when true the obfuscator chain is forced through quantise+permute so that no parameter combination yields an invertible result; UI shows a lock badge"},
+      "mask_only_output": {"default": false, "note": "outputs the matte as white-on-black RGB and in alpha; disables obfuscators; satisfies A9"},
+      "invert_mask": {"default": false},
+      "per_instance_override": {"note": "each plate track can override any modifier; defaults inherit from the clip-level settings (A6)"}
+    },
+    "ui_and_interaction": {
+      "viewer_interact": ["click to seed", "drag corners of the quad", "shift-click to add another plate", "alt-click to delete", "number badge per instance"],
+      "buttons": ["Detect license plate", "Track license plate", "Clear track", "Re-seed here"],
+      "state_indicators": ["confirmed / occluded / out-of-frame colour coding on the overlay", "keyframe markers on the timeline ruler"],
+      "feedback": ["progress bar with cancel during track", "warning when plate height < 12 px", "warning when destructive lock is off"]
+    },
+    "host_and_platform": {
+      "os": ["macOS (Apple Silicon: CoreML / Metal)", "Windows (CUDA / DirectML)", "Linux (CUDA)"],
+      "inference_runtime": ["ONNX Runtime", "CoreML", "TensorRT"],
+      "gpu_memory_budget_mb": {"target": 1500},
+      "realtime_target": "≥ 24 fps at 1080p for mask + blur once tracked; detection may be offline",
+      "resolve_versions": ["18.6", "19", "20"],
+      "ofx_api": "1.4 with Interact suite; verify overlay behaviour on Edit vs Color vs Fusion pages",
+      "cache_interaction": "track data is stored in plugin params so Resolve's render cache invalidates correctly on edit"
+    },
+    "data_and_evaluation": {
+      "training_corpus": ["Swiss dashcam / street footage (own capture)", "synthetic Swiss plates composited onto vehicles (domain randomisation)", "public plate datasets re-weighted (CCPD, UFPR-ALPR, OpenALPR benchmark) as secondary"],
+      "metrics": {
+        "detection": ["recall@IoU0.5 on Swiss set", "precision", "small-object recall (plate height < 20 px)"],
+        "tracking": ["MOTA", "IDF1", "ID switches", "occlusion recovery rate", "out-of-frame return recovery rate"],
+        "anonymisation": ["OCR success rate on output (must be ~0)", "super-resolution attack success over 100-frame stacks (must be ~0)"]
+      },
+      "privacy_and_legal_context": "Swiss plates are personal data under the nDSG / FADP; the destructive requirement (A1) exists so that rendered deliverables carry no recoverable plate information."
+    }
+  },
+
+  "cross_references": {
+    "user_stories_to_components": [
+      {"story": "click on the license plate in the viewer", "maps_to": ["E2", "F2", "ui_and_interaction.viewer_interact"]},
+      {"story": "click 'detect license plate'", "maps_to": ["E1", "A8", "detection_hyperparameters"]},
+      {"story": "when it's good, click 'track license plate'", "maps_to": ["E6", "E3", "A8", "tracking_hyperparameters"]},
+      {"story": "obstruction / partial obstruction", "maps_to": ["E5", "A3", "A4", "F6"]},
+      {"story": "out of frame and return", "maps_to": ["E5", "E4", "F2 re-acquisition", "tracking_hyperparameters.max_age_frames"]},
+      {"story": "multiple license plates supported", "maps_to": ["A6", "F4", "mask_output_modifiers.per_instance_override"]},
+      {"story": "swiss license plates are priority", "maps_to": ["A5", "factors.plate_domain.swiss_formats"]},
+      {"story": "feather, expand, contract", "maps_to": ["F3", "F5", "mask_output_modifiers"]},
+      {"story": "randomize pixels, blur, pixelize with reversal protection", "maps_to": ["E7", "A1", "mask_output_modifiers.destructive_lock"]},
+      {"story": "use it as a mask for other effects", "maps_to": ["A9", "mask_output_modifiers.mask_only_output", "host.recommended_architecture"]}
+    ]
+  }
+}
