@@ -18,6 +18,10 @@
 #include "core/Log.h"
 #include "Monitor.h"
 #include <cmath>
+#include <functional>
+#include <memory>
+#include <vector>
+#include <string>
 #include <cstring>
 #include <algorithm>
 
