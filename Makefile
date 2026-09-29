@@ -85,7 +85,7 @@ install: plugin
 	sudo cp -R "$(BUNDLE)" "$(INSTALL_DIR)/"
 	@echo "Installed to $(INSTALL_DIR)/$(NAME).ofx.bundle - restart DaVinci Resolve"
 
-VERSION := $(shell sed -n 's:.*<key>CFBundleShortVersionString</key>.*::p; /CFBundleShortVersionString/{n;s:.*<string>\(.*\)</string>.*:\1:p;}' packaging/Info.plist)
+VERSION := $(shell /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' packaging/Info.plist 2>/dev/null || echo 1.0.0)
 DIST := $(BUILD)/dist/PlateMask-$(VERSION)-macOS
 
 # Release artefacts: a zip (bundle + install script) and an unsigned .pkg installer.
