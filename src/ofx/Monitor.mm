@@ -125,12 +125,4 @@ bool monitorCancelled() { return gCancelled.load(); }
 bool monitorMainThreadResponsive() { return gDrawn.load(); }
 
 }  // namespace pmui
-#else
-namespace pmui {
-void monitorShow(const std::string&) {}
-void monitorUpdate(std::shared_ptr<std::vector<uint8_t>>, int, int, const std::string&, double) {}
-void monitorClose() {}
-bool monitorCancelled() { return false; }
-bool monitorMainThreadResponsive() { return true; }
-}  // namespace pmui
 #endif

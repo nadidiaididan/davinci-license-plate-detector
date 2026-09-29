@@ -1,0 +1,37 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-latest, cmake_args: "-A x64", artifact: PlateMask-windows-x64 }
+          - { name: macos-universal, os: macos-latest, cmake_args: "", artifact: PlateMask-macos-universal }
+          - { name: linux-x64, os: ubuntu-latest, cmake_args: "", artifact: PlateMask-linux-x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build ${{ matrix.cmake_args }} -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test (core + plugin binary through the mini host)
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Show bundle
+        shell: bash
+        run: find build/PlateMask.ofx.bundle -type f -exec ls -la {} \;
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: build/PlateMask.ofx.bundle
+          if-no-files-found: error

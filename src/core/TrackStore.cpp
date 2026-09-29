@@ -7,6 +7,13 @@
 #include <random>
 #include <sys/stat.h>
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #include <direct.h>
 #define MKDIR(p) _mkdir(p)
 #else
@@ -162,7 +169,11 @@ bool saveStore(const std::string& path, const Store& s) {
     f << s.toJson();
     if (!f) return false;
   }
+#ifdef _WIN32
+  if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { std::remove(tmp.c_str()); return false; }
+#else
   if (std::rename(tmp.c_str(), path.c_str()) != 0) { std::remove(tmp.c_str()); return false; }
+#endif
   return true;
 }
 
